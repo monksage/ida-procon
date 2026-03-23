@@ -33,10 +33,10 @@ Create a directory in `knot/{knot_name}/` with a `graph.json`:
 {
   "name": "knot_name",
   "contours": [
-    {"module": "protocol", "contour": "data_exchange@sub_..."},
-    {"module": "algorithm", "contour": "pcr_analysis@sub_..."}
+    {"module": "module_a", "contour": "data_exchange@sub_..."},
+    {"module": "module_b", "contour": "compute_result@sub_..."}
   ],
-  "flow": "protocol receives data → algorithm computes PCR → protocol returns result",
+  "flow": "module_a receives data → module_b computes result → module_a returns output",
   "edges": [
     ["protocol:sub_...", "algorithm:sub_..."]
   ],

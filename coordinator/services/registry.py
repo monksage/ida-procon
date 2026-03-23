@@ -50,11 +50,20 @@ class Registry:
         for entry in self.dump_dir.iterdir():
             if entry.is_dir() and (entry / "manifest.json").exists():
                 name = entry.name
+                if name in self.modules:
+                    continue
                 manifest = load_manifest(entry)
                 coverage = load_coverage(entry)
                 self.modules[name] = ModuleData(name, entry, manifest, coverage)
                 func_count = len(manifest.get("functions", {}))
                 print(f"  Loaded module: {name} ({func_count} functions)")
+
+    def reload(self) -> list[str]:
+        """Scan for new modules and load them. Returns list of newly loaded module names."""
+        before = set(self.modules.keys())
+        self._load_all()
+        after = set(self.modules.keys())
+        return list(after - before)
 
     def get_module(self, name: str) -> ModuleData | None:
         return self.modules.get(name)

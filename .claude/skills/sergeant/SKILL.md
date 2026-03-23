@@ -17,7 +17,7 @@ curl -s --noproxy '*' http://127.0.0.1:40000/status
 
 If it fails, tell Commander to start it:
 ```bash
-cd coordinator && python main.py --port 40000
+cd coordinator && python main.py --port 40000 --dump-dir ../dump
 ```
 
 ## Step 2: Analyze situation
@@ -30,11 +30,18 @@ Report coverage stats for all modules. Recommend next action:
 - If most functions resolved but contours exist across modules → recommend corporal (knot)
 - If a module has no dump yet → recommend running ida_dump.py
 
+### If "dump {module} {port}":
+1. Run the dumper: `cd . && python ida_dump.py --port {PORT} --module {MODULE} --output dump`
+2. After dump completes, reload coordinator: `curl -s --noproxy '*' -X POST http://127.0.0.1:40000/reload`
+3. Verify module appeared: `curl -s --noproxy '*' http://127.0.0.1:40000/status?module={MODULE}`
+4. Report result and recommend soldier deployment
+
 ### If a module name (e.g., "algorithm"):
-1. Check that module's status via API
-2. Check how many contours exist: `curl -s --noproxy '*' http://127.0.0.1:40000/contours?module={MODULE}`
-3. Get top entry points: `curl -s --noproxy '*' "http://127.0.0.1:40000/next-entry?module={MODULE}&size=func&limit=5"`
-4. Report findings and give Commander a ready-to-use Agent launch command:
+1. If module not in `/status` → tell Commander to dump it first, or run dump yourself if port is known
+2. Check that module's status via API
+3. Check how many contours exist: `curl -s --noproxy '*' http://127.0.0.1:40000/contours?module={MODULE}`
+4. Get top entry points: `curl -s --noproxy '*' "http://127.0.0.1:40000/next-entry?module={MODULE}&size=func&limit=5"`
+5. Report findings and give Commander a ready-to-use Agent launch command:
 
 ```
 Launch a soldier (opus) with this prompt:
@@ -64,14 +71,19 @@ After analysis, always output:
 
 ## Deployment Rules
 
-**Minimum loop sizes (non-negotiable):**
-- Opus soldiers: minimum **10 contours** per session. Never launch opus for less.
-- Sonnet soldiers: minimum **5 contours** per session. Never launch sonnet for less.
-- Single-contour runs waste most tokens on warmup. Forbidden in production.
+**Claude soldiers (via Agent tool):**
+- Opus: minimum **10 contours** per session, recommended 10-15
+- Sonnet: minimum **5 contours** per session, recommended 5-8
 
-**Recommended loop sizes:**
-- Opus: 10-15 contours (safe within 500K context)
-- Sonnet: 5-8 contours (safe within 300K context)
+**GPT soldiers (via Codex CLI):**
+- Optimal: **1-2 contours** per session (context grows fast, cheaper to restart)
+- Launch many in parallel (3-5 is safe, 10+ may overload API)
+- Command:
+```bash
+HTTP_PROXY=http://127.0.0.1:12334 HTTPS_PROXY=http://127.0.0.1:12334 NO_PROXY=127.0.0.1,localhost,::1 \
+  codex exec --full-auto --skip-git-repo-check -C "{WORKDIR}" \
+  "Read agents/soldiers/gpt/procon_orders.md and follow the workflow exactly. Module is {MODULE}. Create {N} contours then stop."
+```
 
 ## General Rules
 

@@ -1,8 +1,6 @@
 """
 ida_dump.py — Dump all decompiled functions from IDA Pro MCP server.
 
-Requires: IDA Pro with zeromcp (MCP server) running on the target binary.
-
 Usage:
     python ida_dump.py --port 13337 --module mylib --output dump
     python ida_dump.py --port 13338 --module myapp --output dump
@@ -20,7 +18,7 @@ import requests
 # Defaults
 # ---------------------------------------------------------------------------
 DEFAULT_PORT = 13337
-DEFAULT_MODULE = "module"
+DEFAULT_MODULE = "algorithm"
 DEFAULT_OUTPUT = "dump"
 DEFAULT_DELAY = 0.05        # seconds between MCP calls
 DEFAULT_BATCH_SIZE = 50     # functions per func_query page
@@ -147,7 +145,13 @@ def fetch_callees_batch(client: MCPClient, addrs: list) -> dict:
         result = client.call("callees", {"addrs": addrs})
         out = {}
         for item in result:
+            if "addr" not in item:
+                continue
             out[item["addr"]] = item.get("callees", [])
+        # fill missing addrs with empty lists
+        for a in addrs:
+            if a not in out:
+                out[a] = []
         return out
     except Exception as e:
         print(f"    WARNING: callees batch failed: {e}")
@@ -164,6 +168,8 @@ def fetch_xrefs_batch(client: MCPClient, addrs: list) -> dict:
         for item in result:
             if "_truncated" in item:
                 break
+            if "addr" not in item:
+                continue
             out[item["addr"]] = item.get("xrefs", [])
     except Exception as e:
         print(f"    WARNING: xrefs batch failed: {e}")
@@ -175,7 +181,7 @@ def fetch_xrefs_batch(client: MCPClient, addrs: list) -> dict:
         try:
             result = client.call("xrefs_to", {"addrs": [addr]})
             for item in result:
-                if "_truncated" not in item:
+                if "_truncated" not in item and "addr" in item:
                     out[item["addr"]] = item.get("xrefs", [])
         except Exception:
             out[addr] = []
@@ -240,12 +246,15 @@ class StateManager:
     def __init__(self, output_dir: str, module: str):
         self.base_dir = os.path.join(output_dir, module)
         self.raw_dir = os.path.join(self.base_dir, "raw_funcs")
+        self.resolved_dir = os.path.join(self.base_dir, "resolved_funcs")
         self.procon_dir = os.path.join(self.base_dir, "procon")
         self.progress_file = os.path.join(self.base_dir, ".progress.json")
         self.manifest_path = os.path.join(self.base_dir, "manifest.json")
+        self.coverage_path = os.path.join(self.base_dir, "coverage.json")
 
     def ensure_dirs(self):
         os.makedirs(self.raw_dir, exist_ok=True)
+        os.makedirs(self.resolved_dir, exist_ok=True)
         os.makedirs(self.procon_dir, exist_ok=True)
 
     def func_path(self, name: str) -> str:
@@ -524,6 +533,62 @@ def phase5_manifest(state: StateManager, progress: dict,
 
 
 # ---------------------------------------------------------------------------
+# Phase 6: Prepare workspace (coverage.json + resolved_funcs)
+# ---------------------------------------------------------------------------
+def phase6_prepare_workspace(state: StateManager):
+    """Create coverage.json from manifest and copy raw_funcs to resolved_funcs."""
+    import shutil
+
+    # --- coverage.json ---
+    if os.path.exists(state.coverage_path):
+        print("[Phase 6] coverage.json already exists, skipping")
+    else:
+        print("[Phase 6] Creating coverage.json...")
+        manifest = json.load(open(state.manifest_path, "r", encoding="utf-8"))
+        coverage = {"nodes": {}}
+        for addr, f in manifest["functions"].items():
+            name = f["name"]
+            size_bytes = int(f.get("size", "0x0"), 16)
+            lines = max(size_bytes // 4, 1)
+            is_skip = f.get("skip", False)
+            if is_skip:
+                size_class = "micro"
+                status = "skip"
+            elif lines <= 10:
+                size_class = "micro"
+                status = "uncovered"
+            elif lines > 200:
+                size_class = "precontour"
+                status = "uncovered"
+            else:
+                size_class = "func"
+                status = "uncovered"
+            coverage["nodes"][name] = {
+                "status": status,
+                "size": size_class,
+                "lines": lines,
+                "partof": [],
+            }
+        with open(state.coverage_path, "w", encoding="utf-8") as f:
+            json.dump(coverage, f, indent=2)
+        total = len(coverage["nodes"])
+        skip_count = sum(1 for v in coverage["nodes"].values() if v["status"] == "skip")
+        print(f"  {total} nodes, {skip_count} skip, {total - skip_count} uncovered")
+
+    # --- resolved_funcs (copy from raw_funcs) ---
+    existing = set(os.listdir(state.resolved_dir)) if os.path.exists(state.resolved_dir) else set()
+    raw_files = set(os.listdir(state.raw_dir))
+    to_copy = raw_files - existing
+    if not to_copy:
+        print(f"[Phase 6] resolved_funcs already populated ({len(existing)} files)")
+    else:
+        print(f"[Phase 6] Copying {len(to_copy)} files to resolved_funcs...")
+        for fname in to_copy:
+            shutil.copy2(os.path.join(state.raw_dir, fname), os.path.join(state.resolved_dir, fname))
+        print(f"  Done: {len(to_copy)} copied, {len(existing)} already existed")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -578,6 +643,9 @@ def main():
 
     # Phase 5
     phase5_manifest(state, progress, funcs, args.module)
+
+    # Phase 6
+    phase6_prepare_workspace(state)
 
     print()
     print("Done!")

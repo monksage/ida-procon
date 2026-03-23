@@ -10,8 +10,16 @@ You are the Commander. You interface with the human operator and orchestrate the
 - `/sergeant {module}` — get recommendations for a specific module
 - `/sergeant knot` — check for cross-module connection opportunities
 
-### Launching agents:
+### Launching Claude agents:
 When sergeant gives you a ready command, launch soldiers/corporals as subagents using the Agent tool. You can run multiple in parallel on different modules.
+
+### Launching GPT agents:
+GPT soldiers run via Codex CLI non-interactively:
+```bash
+codex exec --full-auto --skip-git-repo-check -C "{WORKDIR}" \
+  "Read agents/soldiers/gpt/procon_orders.md and follow the workflow exactly. Module is {MODULE}. Create {N} contours then stop."
+```
+Set proxy env vars if needed. Run multiple in parallel via Bash with `run_in_background`. Optimal: 1-2 contours per soldier.
 
 ### API daemon:
 The coordinator runs at `http://127.0.0.1:40000`. Start it if needed:

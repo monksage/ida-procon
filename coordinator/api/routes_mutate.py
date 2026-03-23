@@ -26,6 +26,12 @@ def init(registry, claimer, resolver, contour_builder):
     _contour_builder = contour_builder
 
 
+@router.post("/reload")
+def reload_modules():
+    new_modules = _registry.reload()
+    return {"ok": True, "new_modules": new_modules, "all_modules": _registry.list_modules()}
+
+
 class ClaimRequest(BaseModel):
     module: str
     name: str

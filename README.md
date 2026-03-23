@@ -1,97 +1,136 @@
 # ida-procon
 
-**Massively parallel reverse engineering with LLM agents.**
+> **ida** + **pro**cessed **con**tour — autonomous reverse engineering at scale.
 
 *[Русская версия ниже](#ru)*
 
-Feed it a binary. Get back structured, annotated, cross-referenced source code — organized into logical contours, not a flat dump.
+---
 
-Built and battle-tested on a real-world industrial control system (3 DLLs, 7000+ functions). 6 agents running in parallel, zero conflicts, 180 contours produced in a single session.
+IDA Pro decompiles binaries. But what it gives you is thousands of `sub_XXXXX` functions with variables named `v1, v2, a3` — no structure, no context, no understanding of how they relate. Manually tracing call graphs, renaming variables, and piecing together what a binary actually does takes weeks for anything non-trivial.
 
-## What it does
-
-Most RE tools give you a pile of decompiled functions. ida-procon gives you **understanding** — by deploying autonomous LLM agents that:
-
-- **Trace call graphs** from entry points through internal callees
-- **Rename variables** from `v1, v2` to meaningful names based on context
-- **Build contours** — named subgraphs that represent logical units ("sparse Cholesky decomposition", "COM IDispatch bridge", "TLS slot manager")
-- **Work in parallel** with atomic claims — no two agents touch the same function
-- **Cross-link modules** — agents naturally follow cross-DLL calls through the API, no manual stitching
+ida-procon closes that gap. You dump the binary once, close IDA, and never open it again. From that point, autonomous LLM agents work through the decompiled code in parallel — tracing calls, renaming variables, writing descriptions, and assembling the results into **contours**: named, annotated subgraphs that represent logical units of the binary.
 
 ```
-6 agents × 15 min = 180 contours, 948 functions resolved
-Cost: ~800K tokens (~$6) for what would take a human weeks
+20 agents in parallel = 690 contours, 2399 functions documented across 13 modules
+Mixed fleet: Claude Opus + Sonnet + GPT via Codex CLI
 ```
 
-## Architecture
+## Why this is different
+
+**You dump once and close IDA.** `ida_dump.py` connects to IDA's [MCP server](https://github.com/mrexodia/ida-pro-mcp), batch-decompiles every function with callees, xrefs, and metadata, and writes structured `.c` files. After that, all work happens through the coordinator API. IDA is not needed again.
+
+**Agents understand what they're looking at.** You don't tell them "this is a numerical library." An agent reads `sub_664212F0`, sees matrix operations and factorization patterns in the callees, and writes: "Sparse Cholesky decomposition (LL^T) with skyline storage." It identifies algorithms, protocols, and design patterns on its own.
+
+**Cross-module linking happens automatically.** When an agent analyzing one DLL sees a call into another, it switches `module=` in the API and reads the code from the other module. No need to reopen IDA with a different binary. The coordinator knows all loaded modules and serves them through the same API. Agents follow dependencies across DLLs as naturally as they follow local calls.
+
+**A contour is not just a graph — it's ready-to-read source code.** The coordinator assembles full annotated source for any contour on demand via `/contour-code`: entry function first, then helpers in call order, each with role and description headers. You can read it as a single file, pass it to another agent, or use it as reference documentation.
+
+**Scaling is trivial.** 1 agent or 20 — the coordinator handles conflicts through atomic claims with TTL. If an agent crashes, its locks auto-release. If two agents reach the same function, one gets a "borrowed" read-only copy. Tested with 20 simultaneous agents (Claude + GPT mixed fleet), zero conflicts.
+
+## How it works
 
 ```
-IDA Pro (zeromcp)  →  ida_dump.py  →  dump/{module}/raw_funcs/
-                                              ↓
-                                    Coordinator API (:40000)
-                                     ↙    ↓    ↘
-                                Agent  Agent  Agent  ...
-                                  ↓      ↓      ↓
-                              contour contour contour
-                                  └──────┼──────┘
-                                   coverage.json
+IDA Pro + ida-pro-mcp        ida_dump.py           Coordinator (:40000)
+┌──────────────────┐    ┌──────────────────┐    ┌──────────────────────┐
+│ Decompiles binary │───▶│ Batch exports    │───▶│ Loads dump, tracks   │
+│ via MCP server    │    │ all functions    │    │ coverage, serves API │
+└──────────────────┘    │ with metadata    │    └──────────┬───────────┘
+                        └──────────────────┘               │
+                                                 ┌─────────┼─────────┐
+                                                 ▼         ▼         ▼
+                                              Agent     Agent     Agent
+                                               │         │         │
+                                            claim →   claim →   claim →
+                                            trace →   trace →   trace →
+                                            improve → improve → improve →
+                                            submit    submit    submit
+                                               │         │         │
+                                               ▼         ▼         ▼
+                                            contour   contour   contour
 ```
 
-**ida_dump.py** — Batch decompiler. Connects to IDA's MCP server, pulls all functions with callees/xrefs, writes structured `.c` files with metadata headers.
+**Step 1 — Dump.** Open your binary in IDA Pro with [ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp). Run `ida_dump.py` — it pulls every function through the MCP server and writes structured `.c` files with callee/xref metadata headers. Close IDA.
 
-**Coordinator** — FastAPI daemon that serializes writes and manages claims. Agents talk to it via HTTP, never touch raw files directly. Supports any number of parallel agents with zero conflicts.
+**Step 2 — Coordinate.** Start the coordinator daemon. It loads the dump, creates a coverage graph (which functions are analyzed, which aren't), and serves a REST API on port 40000.
 
-**Agents** — Claude Code subagents (opus for complex 200+ line functions, sonnet for regular ones). Each agent autonomously: claims → traces → improves → submits. Minimum 10 contours per opus session, 5 per sonnet.
+**Step 3 — Analyze.** Launch Claude Code agents. Each one autonomously: asks for the richest uncovered entry point → claims it → traces callees → improves the code → submits a contour. The sergeant skill (`/sergeant`) recommends how many agents to launch and generates ready-to-paste commands.
 
-**Contours** — The output. Each contour is a named call subgraph:
+## What's a contour?
+
+The name **procon** comes from **pro**cessed **con**tour — the core output unit.
+
+A contour is a named subgraph of related functions that represent a single logical unit of the binary. Instead of a flat list of 7000 improved functions, you get structured groups like "sparse Cholesky decomposition", "COM IDispatch bridge", or "TLS slot manager".
 
 ```json
 {
   "name": "sparse_cholesky@sub_664212F0",
-  "entry": "sub_664212F0",
   "summary": "Sparse Cholesky decomposition (LL^T/LDL^T) with skyline storage",
   "nodes": {
-    "sub_664212F0": {"role": "entry", "description": "Main factorization dispatcher"},
-    "sub_6641FE90": {"role": "helper", "description": "Rank-1 Givens rotation update"},
-    "sub_66420E90": {"role": "borrowed", "description": "Skyline Cholesky (claimed by another agent)"}
+    "sub_664212F0": { "role": "entry",    "description": "Main factorization dispatcher" },
+    "sub_6641FE90": { "role": "helper",   "description": "Rank-1 Givens rotation update" },
+    "sub_66420E90": { "role": "borrowed", "description": "Skyline Cholesky (claimed by another agent)" }
   },
   "edges": [["sub_664212F0", "sub_6641FE90"], ["sub_664212F0", "sub_66420E90"]],
-  "external_deps": [{"name": "EnterCriticalSection", "module": "KERNEL32"}]
+  "external_deps": [{ "name": "EnterCriticalSection", "module": "KERNEL32" }]
 }
 ```
 
-## Results on real target
+Roles: **entry** (root function), **helper** (called by entry), **leaf** (terminal), **micro** (≤10 lines, shared across contours), **borrowed** (claimed by another agent — read-only reference).
 
-Tested on a real-world industrial control system (3 DLLs, no source code):
+## Results
 
-| Module | Functions | Resolved | Contours | Coverage |
-|--------|-----------|----------|----------|----------|
-| algorithm.dll | 5307 | 696 | 115 | 13.3% |
-| protocol.dll | 708 | 244 | 65 | 40.0% |
-| main.exe | 971 | 8 | 1 | 1.0% |
+Tested on a real-world closed-source application (13 DLLs, 11600+ functions, no source code available):
 
-**What agents found:**
-- algorithm.dll is a statically linked numerical library — agents identified FFT, SVD, Cholesky, spline fitting, neural networks, optimization solvers
-- protocol.dll is a Qt/COM bridge — QAxBase, IDispatch marshalling, QVariant conversion, XML serialization
-- Cross-module linking happened naturally: agents reading protocol code followed calls into algorithm functions through the API
+| Module | Functions | Documented | Contours | Coverage |
+|--------|-----------|------------|----------|----------|
+| A.dll | 708 | 376 | 153 | 61.6% |
+| B.dll | 147 | 31 | 16 | 60.8% |
+| C.dll | 802 | 255 | 80 | 44.3% |
+| D.dll | 1078 | 316 | 97 | 42.4% |
+| E.exe | 971 | 284 | 69 | 34.0% |
+| F.dll | 1265 | 248 | 80 | 30.3% |
+| G.dll | 5307 | 696 | 115 | 13.3% |
+| + 6 more modules | 1332 | 193 | 80 | — |
+| **Total** | **11610** | **2399** | **690** | **25.4%** |
 
-**Emergent behavior:** We designed a separate "knot" layer for cross-module connections. Turned out it wasn't needed — agents discover cross-module dependencies organically by following external_deps through the API. The coordinator already *is* the linker.
+**What agents discovered** — with zero prior knowledge of the binary:
+- G.dll is a statically linked numerical library — agents identified FFT, SVD, Cholesky factorization, curve fitting algorithms
+- A.dll handles the main data processing pipeline: XML parsing, signal correction, data analysis
+- E.exe orchestrates via Qt custom events across plugin DLLs
+- D.dll communicates with hardware over TCP
+- B.dll implements a license verification handshake
+- Cross-module call paths were traced across 4 DLLs — through Qt event dispatch, COM/IDispatch, and DLL imports
+
+## After analysis
+
+Once contours are built, the coordinator becomes a **source server** for the entire binary:
+
+**Assembled source code.** `GET /contour-code?module=X&name=Y` returns the full annotated source of a contour — entry function first, then helpers in call order, each preceded by a comment block with its role and description. This is not a JSON graph — it's readable `.c` code you can hand to a human or another agent.
+
+**Cross-module navigation.** Every contour lists its `external_deps` — calls into other modules. Any agent (or script) can resolve them: `GET /func-code?module=algorithm&name=sub_664212F0` returns the code regardless of which DLL it came from. The coordinator already has all modules loaded. No need to switch IDA databases — just change the `module=` parameter.
+
+**Feed it forward.** The contour-code endpoint turns ida-procon into a backend for downstream tools. Point another Claude Code agent at `API_READ.md`, give it the coordinator URL, and it can browse the entire reverse-engineered codebase through HTTP — reading contours, following cross-module calls, building higher-level understanding on top of what the soldiers already produced.
 
 ## Quickstart
 
 ### Prerequisites
-- IDA Pro 9.x with [zeromcp](https://github.com/nickcano/zeromcp)
-- Python 3.10+
-- [Claude Code](https://claude.ai/code)
+
+- **IDA Pro 9.x** with [ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp) — exposes IDA's decompiler as an MCP server
+- **Python 3.10+**
+- **[Claude Code](https://claude.ai/code)** — the CLI that runs the agents
 
 ### 1. Dump from IDA
+
+Open your binary in IDA, make sure ida-pro-mcp is running (default port 13337):
 
 ```bash
 pip install requests
 python ida_dump.py --port 13337 --module mylib --output dump
 ```
 
-### 2. Start coordinator
+This decompiles all functions and writes them to `dump/mylib/raw_funcs/` with a `manifest.json` index. Close IDA after the dump completes.
+
+### 2. Start the coordinator
 
 ```bash
 cd coordinator
@@ -99,60 +138,86 @@ pip install -r requirements.txt
 python main.py --port 40000 --dump-dir ../dump
 ```
 
-### 3. Deploy agents
+The coordinator loads all modules from the dump directory and starts serving on port 40000.
 
-From the repo root in Claude Code:
+### 3. Launch agents
+
+Open Claude Code in the repo root:
+
 ```
-/sergeant status
-/sergeant mylib
+/sergeant status          # coverage across all modules
+/sergeant mylib           # get agent launch recommendations
 ```
 
-The sergeant analyzes coverage and gives you ready-to-paste commands for launching parallel soldiers.
+The sergeant analyzes what's left to cover and gives you ready-to-paste commands for launching soldiers. Run as many in parallel as you want.
+
+### 4. Read results
+
+```bash
+# list all contours with summaries
+curl http://127.0.0.1:40000/contours?module=mylib
+
+# get assembled source code for a contour
+curl "http://127.0.0.1:40000/contour-code?module=mylib&name=sparse_cholesky@sub_664212F0"
+
+# overall coverage stats
+curl http://127.0.0.1:40000/status
+```
+
+## Agent hierarchy
+
+```
+You (Commander)
+ └── /sergeant — analyzes coverage, recommends what to launch
+      ├── Opus soldiers (Claude) — complex functions (200+ lines), ≥10 contours per session
+      ├── Sonnet soldiers (Claude) — regular functions (11-200 lines), ≥5 contours per session
+      └── GPT soldiers (Codex CLI) — regular functions, 1-2 contours per session, many in parallel
+```
+
+Claude soldiers are launched via the Agent tool and use Read/Edit for file access. GPT soldiers run non-interactively via `codex exec` and work entirely through the coordinator API. The Commander (you) only needs to launch them and monitor coverage.
 
 ## API
 
-Full reference: [API.md](API.md) | Read-only reference: [API_READ.md](API_READ.md)
+Full reference: **[API.md](API.md)** | Read-only reference: **[API_READ.md](API_READ.md)**
 
-Key endpoints:
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/status` | Coverage stats per module |
-| GET | `/next-entry?module=X` | Best uncovered function to work on |
-| GET | `/contour-code?module=X&name=Y` | Assembled source of entire contour |
-| GET | `/contours?module=X` | List all contours with summaries |
-| POST | `/claim` | Atomically claim a function |
-| POST | `/submit-contour` | Submit completed contour |
-
-## How agents avoid conflicts
-
-The claim system makes parallel execution safe:
-
-1. Agent calls `POST /claim {module, name}` — atomic lock with 600s TTL
-2. If another agent already claimed it → function becomes "borrowed" (read-only, still included in contour graph for context)
-3. Claims auto-release if agent crashes
-4. All coverage writes go through a serialized queue — no race conditions
-
-Tested with 6 simultaneous agents, zero conflicts.
+| `GET` | `/status` | Coverage stats per module |
+| `GET` | `/next-entry?module=X` | Richest uncovered function to analyze next |
+| `GET` | `/contours?module=X` | All contours with summaries |
+| `GET` | `/contour-code?module=X&name=Y` | Assembled annotated source for a contour |
+| `GET` | `/func-code?module=X&name=Y` | Source code of a single function |
+| `POST` | `/claim` | Atomically lock a function for editing |
+| `POST` | `/submit-contour` | Submit a completed contour |
 
 ## Repo structure
 
 ```
 ida-procon/
-├── ida_dump.py              # IDA batch decompiler
-├── coordinator/             # FastAPI coordination daemon
-│   ├── main.py              # Entry point
-│   ├── api/                 # REST endpoints
-│   ├── models/              # Pydantic schemas
-│   ├── services/            # Business logic (claims, resolution, contours)
-│   └── storage/             # File I/O
-├── agents/                  # Agent orders
-│   ├── soldiers/opus/       # Opus handles 200+ line functions
-│   └── soldiers/sonnet/     # Sonnet handles 11-200 line functions
-├── .claude/skills/sergeant/ # Orchestration skill
-├── CLAUDE.md                # Commander instructions
-├── API.md                   # Full API reference
-└── API_READ.md              # Read-only API reference
+├── ida_dump.py                # Batch decompiler (IDA → structured .c files)
+├── coordinator/               # FastAPI coordination daemon
+│   ├── main.py                # Entry point (port 40000 by default)
+│   ├── api/                   # REST endpoints (query + mutation)
+│   ├── models/                # Pydantic schemas
+│   ├── services/              # Claims, resolution, contour assembly
+│   └── storage/               # File I/O layer
+├── agents/                    # Agent instructions
+│   ├── AGENTS.md              # Rules for all subagents
+│   ├── sergeant/              # Orchestrator orders
+│   └── soldiers/
+│       ├── opus/              # Claude Opus — complex functions
+│       ├── sonnet/            # Claude Sonnet — regular functions
+│       └── gpt/               # GPT via Codex CLI — regular functions
+├── .claude/skills/sergeant/   # Orchestration skill for Claude Code
+├── CLAUDE.md                  # Commander instructions
+├── API.md                     # Full API reference
+├── API_READ.md                # Read-only API reference
+└── LICENSE                    # MIT
 ```
+
+## License
+
+MIT
 
 ---
 
@@ -160,79 +225,133 @@ ida-procon/
 
 # ida-procon (RU)
 
-**Массово-параллельный реверс-инжиниринг с LLM-агентами.**
+> **ida** + **pro**cessed **con**tour — автономный реверс-инжиниринг в масштабе.
 
-Скорми бинарник — получи структурированный, аннотированный, перекрёстно связанный исходный код. Не плоский дамп, а логические контуры.
+---
 
-Создано и протестировано на реальной промышленной системе управления (3 DLL, 7000+ функций). 6 агентов параллельно, ноль конфликтов, 180 контуров за одну сессию.
+IDA Pro декомпилирует бинарники. Но на выходе — тысячи функций `sub_XXXXX` с переменными `v1, v2, a3`. Никакой структуры, никакого контекста, никакого понимания связей. Ручная трассировка графов вызовов, переименование переменных и восстановление логики бинарника — это недели работы для чего-то нетривиального.
 
-## Что это делает
-
-Большинство RE-инструментов выдают кучу декомпилированных функций. ida-procon даёт **понимание** — разворачивая автономных LLM-агентов, которые:
-
-- **Трассируют граф вызовов** от точки входа через внутренние callees
-- **Переименовывают переменные** из `v1, v2` в осмысленные имена по контексту
-- **Строят контуры** — именованные подграфы, представляющие логические единицы ("разложение Холецкого", "мост COM IDispatch", "менеджер TLS-слотов")
-- **Работают параллельно** с атомарными claim'ами — два агента никогда не трогают одну функцию
-- **Связывают модули** — агенты естественно следуют кросс-DLL вызовам через API, без ручной сшивки
+ida-procon закрывает этот разрыв. Вы дампите бинарник один раз, закрываете IDA и больше её не открываете. Дальше автономные LLM-агенты параллельно работают с декомпилированным кодом — трассируют вызовы, переименовывают переменные, пишут описания и собирают результаты в **контуры**: именованные, аннотированные подграфы, представляющие логические единицы бинарника.
 
 ```
-6 агентов × 15 мин = 180 контуров, 948 функций разобрано
-Стоимость: ~800K токенов (~$6) за работу, которая заняла бы у человека недели
+20 агентов параллельно = 690 контуров, 2399 функций задокументировано в 13 модулях
+Смешанный флот: Claude Opus + Sonnet + GPT через Codex CLI
 ```
 
-## Архитектура
+## Почему это другое
+
+**Дампишь один раз и закрываешь IDA.** `ida_dump.py` подключается к [MCP-серверу](https://github.com/mrexodia/ida-pro-mcp) IDA, пакетно декомпилирует все функции с callees, xrefs и метаданными, и записывает структурированные `.c` файлы. После этого вся работа идёт через API координатора. IDA больше не нужна.
+
+**Агенты сами понимают что перед ними.** Вы не говорите им "это численная библиотека". Агент читает `sub_664212F0`, видит матричные операции и паттерны факторизации в callees, и пишет: "Sparse Cholesky decomposition (LL^T) with skyline storage". Он сам распознаёт алгоритмы, протоколы и паттерны проектирования.
+
+**Кросс-модульная связка происходит автоматически.** Когда агент, анализирующий одну DLL, видит вызов в другую, он переключает `module=` в API и читает код из другого модуля. Не нужно переоткрывать IDA с другим бинарником. Координатор знает все загруженные модули и отдаёт их через единый API. Агенты следуют зависимостям между DLL так же естественно, как и по локальным вызовам.
+
+**Контур — это не просто граф, а готовый к чтению исходный код.** Координатор собирает полный аннотированный исходник любого контура по запросу `/contour-code`: entry-функция сверху, затем helpers в порядке вызовов, каждая с заголовком роли и описания. Можно читать как единый файл, передать другому агенту или использовать как справочную документацию.
+
+**Масштабирование тривиально.** 1 агент или 20 — координатор разруливает конфликты через атомарные захваты с TTL. Если агент упал — блокировка снимается автоматически. Если два агента дошли до одной функции — один получает "borrowed" копию (только чтение). Протестировано с 20 одновременными агентами (смешанный флот Claude + GPT), ноль конфликтов.
+
+## Как это работает
 
 ```
-IDA Pro (zeromcp)  →  ida_dump.py  →  dump/{module}/raw_funcs/
-                                              ↓
-                                    Координатор API (:40000)
-                                     ↙    ↓    ↘
-                                Агент  Агент  Агент  ...
-                                  ↓      ↓      ↓
-                              контур  контур  контур
-                                  └──────┼──────┘
-                                   coverage.json
+IDA Pro + ida-pro-mcp         ida_dump.py           Координатор (:40000)
+┌──────────────────┐    ┌──────────────────┐    ┌──────────────────────┐
+│ Декомпилирует     │───▶│ Пакетный экспорт │───▶│ Загружает дамп,      │
+│ через MCP-сервер  │    │ всех функций     │    │ треки покрытия, API  │
+└──────────────────┘    │ с метаданными    │    └──────────┬───────────┘
+                        └──────────────────┘               │
+                                                 ┌─────────┼─────────┐
+                                                 ▼         ▼         ▼
+                                              Агент     Агент     Агент
+                                               │         │         │
+                                            claim →   claim →   claim →
+                                            trace →   trace →   trace →
+                                            improve → improve → improve →
+                                            submit    submit    submit
+                                               │         │         │
+                                               ▼         ▼         ▼
+                                            контур    контур    контур
 ```
 
-**ida_dump.py** — Пакетный декомпилятор. Подключается к MCP-серверу IDA, вытягивает все функции с callees/xrefs, пишет структурированные `.c` файлы с заголовками метаданных.
+**Шаг 1 — Дамп.** Откройте бинарник в IDA Pro с [ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp). Запустите `ida_dump.py` — он вытянет каждую функцию через MCP-сервер и запишет структурированные `.c` файлы с метаданными callees/xrefs. Закройте IDA.
 
-**Координатор** — FastAPI-демон, сериализующий запись и управляющий claim'ами. Агенты общаются с ним по HTTP, не трогая файлы напрямую. Поддерживает любое число параллельных агентов без конфликтов.
+**Шаг 2 — Координация.** Запустите демон-координатор. Он загружает дамп, создаёт граф покрытия (какие функции проанализированы, какие нет) и запускает REST API на порту 40000.
 
-**Агенты** — субагенты Claude Code (opus для сложных функций 200+ строк, sonnet для обычных). Каждый агент автономно: claim → трассировка → улучшение → submit. Минимум 10 контуров за сессию opus, 5 за sonnet.
+**Шаг 3 — Анализ.** Запустите агентов Claude Code. Каждый автономно: запрашивает самую богатую непокрытую точку входа → захватывает → трассирует callees → улучшает код → сдаёт контур. Скилл сержанта (`/sergeant`) подскажет сколько агентов запускать и сгенерирует готовые команды.
 
-**Контуры** — результат работы. Каждый контур — именованный подграф вызовов с ролями (entry, helper, leaf, borrowed) и описаниями.
+## Что такое контур?
 
-## Результаты на реальном таргете
+Название **procon** — от **pro**cessed **con**tour, обработанный контур — основная единица вывода.
 
-Протестировано на реальной промышленной системе управления (3 DLL, исходников нет):
+Контур — это именованный подграф связанных функций, представляющий одну логическую единицу бинарника. Вместо плоского списка из 7000 улучшенных функций вы получаете структурированные группы: "разреженное разложение Холецкого", "мост COM IDispatch", "менеджер TLS-слотов".
 
-| Модуль | Функций | Разобрано | Контуров | Покрытие |
-|--------|---------|-----------|----------|----------|
-| algorithm.dll | 5307 | 696 | 115 | 13.3% |
-| protocol.dll | 708 | 244 | 65 | 40.0% |
-| main.exe | 971 | 8 | 1 | 1.0% |
+```json
+{
+  "name": "sparse_cholesky@sub_664212F0",
+  "summary": "Sparse Cholesky decomposition (LL^T/LDL^T) with skyline storage",
+  "nodes": {
+    "sub_664212F0": { "role": "entry",    "description": "Main factorization dispatcher" },
+    "sub_6641FE90": { "role": "helper",   "description": "Rank-1 Givens rotation update" },
+    "sub_66420E90": { "role": "borrowed", "description": "Skyline Cholesky (claimed by another agent)" }
+  },
+  "edges": [["sub_664212F0", "sub_6641FE90"], ["sub_664212F0", "sub_66420E90"]],
+  "external_deps": [{ "name": "EnterCriticalSection", "module": "KERNEL32" }]
+}
+```
 
-**Что нашли агенты:**
-- algorithm.dll — статически слинкованная численная библиотека. Агенты опознали FFT, SVD, Холецкий, сплайн-фиттинг, нейросети, оптимизационные солверы
-- protocol.dll — Qt/COM мост. QAxBase, маршаллинг IDispatch, конвертация QVariant, XML-сериализация
-- Кросс-модульная связка произошла естественно: агенты, читая код protocol, следовали за вызовами в algorithm через API
+Роли: **entry** (корневая функция), **helper** (вызывается из entry), **leaf** (терминальная), **micro** (≤10 строк, общая для нескольких контуров), **borrowed** (захвачена другим агентом — только чтение).
 
-**Эмерджентное поведение:** Мы проектировали отдельный слой "knot" для кросс-модульных связей. Оказалось, он не нужен — агенты обнаруживают зависимости между модулями органически, следуя по external_deps через API. Координатор уже *является* линковщиком.
+## Результаты
+
+Протестировано на реальном закрытом приложении (13 DLL, 11600+ функций, исходников нет):
+
+| Модуль | Функций | Задокументировано | Контуров | Покрытие |
+|--------|---------|-------------------|----------|----------|
+| A.dll | 708 | 376 | 153 | 61.6% |
+| B.dll | 147 | 31 | 16 | 60.8% |
+| C.dll | 802 | 255 | 80 | 44.3% |
+| D.dll | 1078 | 316 | 97 | 42.4% |
+| E.exe | 971 | 284 | 69 | 34.0% |
+| F.dll | 1265 | 248 | 80 | 30.3% |
+| G.dll | 5307 | 696 | 115 | 13.3% |
+| + ещё 6 модулей | 1332 | 193 | 80 | — |
+| **Итого** | **11610** | **2399** | **690** | **25.4%** |
+
+**Что обнаружили агенты** — без какого-либо предварительного знания о бинарнике:
+- G.dll — статически слинкованная численная библиотека: агенты опознали FFT, SVD, разложение Холецкого, алгоритмы фитинга кривых
+- A.dll — пайплайн обработки данных: парсинг XML, коррекция сигнала, анализ данных
+- E.exe оркестрирует через кастомные Qt events между плагинами
+- D.dll общается с оборудованием по TCP
+- B.dll реализует лицензионную верификацию
+- Кросс-модульные пути прослежены через 4 DLL — через Qt event dispatch, COM/IDispatch и DLL импорты
+
+## После анализа
+
+Когда контуры построены, координатор становится **сервером исходного кода** всего бинарника:
+
+**Собранный исходный код.** `GET /contour-code?module=X&name=Y` возвращает полный аннотированный исходник контура — entry-функция первой, затем helpers в порядке вызовов, каждая с комментарием роли и описания. Это не JSON-граф — это читаемый `.c` код, который можно отдать человеку или другому агенту.
+
+**Кросс-модульная навигация.** Каждый контур содержит `external_deps` — вызовы в другие модули. Любой агент (или скрипт) может их разрешить: `GET /func-code?module=algorithm&name=sub_664212F0` вернёт код независимо от того, из какой DLL он пришёл. Координатор уже загрузил все модули. Не нужно переключать базы IDA — просто измените параметр `module=`.
+
+**Передай дальше.** Эндпоинт contour-code превращает ida-procon в бэкенд для последующих инструментов. Направьте другого агента Claude Code на `API_READ.md`, дайте ему URL координатора — и он сможет просматривать всю реверснутую кодовую базу по HTTP: читать контуры, следовать кросс-модульным вызовам, строить более высокоуровневое понимание поверх того, что солдаты уже наработали.
 
 ## Быстрый старт
 
 ### Требования
-- IDA Pro 9.x с [zeromcp](https://github.com/nickcano/zeromcp)
-- Python 3.10+
-- [Claude Code](https://claude.ai/code)
+
+- **IDA Pro 9.x** с [ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp) — открывает декомпилятор IDA как MCP-сервер
+- **Python 3.10+**
+- **[Claude Code](https://claude.ai/code)** — CLI, который запускает агентов
 
 ### 1. Дамп из IDA
+
+Откройте бинарник в IDA, убедитесь что ida-pro-mcp запущен (порт по умолчанию 13337):
 
 ```bash
 pip install requests
 python ida_dump.py --port 13337 --module mylib --output dump
 ```
+
+Декомпилирует все функции и запишет в `dump/mylib/raw_funcs/` с индексом `manifest.json`. После завершения закройте IDA.
 
 ### 2. Запуск координатора
 
@@ -242,24 +361,32 @@ pip install -r requirements.txt
 python main.py --port 40000 --dump-dir ../dump
 ```
 
-### 3. Деплой агентов
+Координатор загрузит все модули из директории дампа и запустится на порту 40000.
 
-Из корня репо в Claude Code:
+### 3. Запуск агентов
+
+Откройте Claude Code в корне репо:
+
 ```
-/sergeant status
-/sergeant mylib
+/sergeant status          # покрытие по всем модулям
+/sergeant mylib           # рекомендации по запуску агентов
 ```
 
-Сержант анализирует покрытие и выдаёт готовые команды для запуска параллельных солдат.
+Сержант анализирует оставшуюся работу и выдаёт готовые команды для запуска солдат. Запускайте сколько хотите параллельно.
 
-## Как агенты избегают конфликтов
+### 4. Чтение результатов
 
-Система claim'ов делает параллельное выполнение безопасным:
+```bash
+# список контуров с описаниями
+curl http://127.0.0.1:40000/contours?module=mylib
 
-1. Агент вызывает `POST /claim {module, name}` — атомарная блокировка с TTL 600 секунд
-2. Если другой агент уже занял функцию → она становится "borrowed" (только чтение, но всё равно включается в граф контура для контекста)
-3. Claim'ы автоматически освобождаются если агент упал
-4. Все записи в coverage идут через сериализованную очередь — никаких гонок
+# собранный исходный код контура
+curl "http://127.0.0.1:40000/contour-code?module=mylib&name=sparse_cholesky@sub_664212F0"
 
-Протестировано с 6 одновременными агентами, ноль конфликтов.
+# общая статистика покрытия
+curl http://127.0.0.1:40000/status
+```
 
+## Лицензия
+
+MIT

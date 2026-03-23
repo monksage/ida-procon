@@ -5,8 +5,11 @@ You are a subagent in a reverse engineering pipeline. Your specific orders are i
 ## Hierarchy
 - **Commander** — launches you, monitors results
 - **Sergeant** (`/sergeant` skill) — analyzes status, recommends actions. Does NOT launch agents.
-- **Soldiers** (`AGENT_ROOM/soldiers/`) — create processed contours (procon)
-- **Corporals** (`AGENT_ROOM/corporals/`) — create cross-module knots
+- **Soldiers** (`agents/soldiers/`) — create processed contours (procon)
+  - `opus/` — Claude Opus, complex functions (200+ lines)
+  - `sonnet/` — Claude Sonnet, regular functions (11-200 lines)
+  - `gpt/` — GPT via Codex CLI, regular functions, runs non-interactively via `codex exec`
+- **Corporals** (`agents/corporals/`) — create cross-module knots
 
 ## API Daemon
 
