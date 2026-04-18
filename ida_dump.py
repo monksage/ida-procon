@@ -64,6 +64,95 @@ def is_crt_function(name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Go runtime / skip detection
+# ---------------------------------------------------------------------------
+# Standard library and runtime packages — IDA replaces "/" with "_" in names,
+# e.g. "internal/cpu" becomes "internal_cpu".
+GO_SKIP_PACKAGES = {
+    "runtime", "runtime_debug", "runtime_internal_atomic", "runtime_internal_sys",
+    "runtime_internal_math", "runtime_internal_abi",
+    "internal_cpu", "internal_abi", "internal_bytealg", "internal_itoa",
+    "internal_oserror", "internal_poll", "internal_race", "internal_reflectlite",
+    "internal_syscall", "internal_testlog", "internal_unsafeheader",
+    "sync", "sync_atomic",
+    "reflect",
+    "unicode", "unicode_utf8", "unicode_utf16",
+    "encoding", "encoding_binary", "encoding_json", "encoding_hex",
+    "encoding_base64", "encoding_base32", "encoding_gob", "encoding_xml",
+    "fmt",
+    "os", "os_exec", "os_signal", "os_user",
+    "strings", "bytes", "strconv",
+    "math", "math_big", "math_bits", "math_cmplx", "math_rand",
+    "sort", "slices",
+    "io", "io_fs", "io_ioutil",
+    "bufio",
+    "errors",
+    "path", "path_filepath",
+    "time",
+    "regexp", "regexp_syntax",
+    "net", "net_http", "net_url", "net_mail", "net_rpc", "net_smtp",
+    "net_textproto", "net_http_cookiejar", "net_http_httputil", "net_http_pprof",
+    "crypto", "crypto_aes", "crypto_cipher", "crypto_des", "crypto_dsa",
+    "crypto_ecdsa", "crypto_ed25519", "crypto_elliptic", "crypto_hmac",
+    "crypto_internal_randutil", "crypto_md5", "crypto_rand", "crypto_rc4",
+    "crypto_rsa", "crypto_sha1", "crypto_sha256", "crypto_sha512",
+    "crypto_subtle", "crypto_tls", "crypto_x509",
+    "compress", "compress_flate", "compress_gzip", "compress_zlib", "compress_bzip2",
+    "archive", "archive_tar", "archive_zip",
+    "container", "container_heap", "container_list", "container_ring",
+    "database", "database_sql",
+    "expvar", "flag",
+    "hash", "hash_adler32", "hash_crc32", "hash_crc64", "hash_fnv",
+    "html", "html_template",
+    "image", "image_color", "image_draw", "image_gif", "image_jpeg", "image_png",
+    "index", "index_suffixarray",
+    "log",
+    "mime", "mime_multipart", "mime_quotedprintable",
+    "plugin",
+    "syscall",
+    "testing", "testing_iotest", "testing_quick",
+    "text", "text_scanner", "text_tabwriter", "text_template",
+    "vendor",
+}
+
+# Assembly stubs that IDA names without a package prefix
+GO_ASM_STUBS = {
+    "aeshashbody", "cmpbody", "memeqbody", "indexbytebody",
+    "gcWriteBarrier", "gogo", "gosave_systemstack_switch",
+    "_rt0_amd64", "_rt0_amd64_windows",
+    "callRet", "setg_gcc", "sigtramp",
+    "nullsub_1",
+}
+
+# Prefixes for auto-generated Go stubs
+GO_ASM_PREFIXES = ("debugCall",)
+
+# Functions whose names appear in Go binaries and signal Go mode
+GO_DETECTION_MARKERS = {"runtime.memmove", "runtime.mallocgc",
+                        "runtime.newproc", "runtime.findRunnable"}
+
+
+def is_go_skip_function(name: str) -> bool:
+    if name in GO_ASM_STUBS:
+        return True
+    for prefix in GO_ASM_PREFIXES:
+        if name.startswith(prefix):
+            return True
+    dot = name.find(".")
+    if dot != -1:
+        pkg = name[:dot]
+        if pkg in GO_SKIP_PACKAGES:
+            return True
+    return False
+
+
+def detect_golang(funcs: list) -> bool:
+    """Return True if the function list looks like a Go binary."""
+    names = {f["name"] for f in funcs[:500]}
+    return bool(names & GO_DETECTION_MARKERS)
+
+
+# ---------------------------------------------------------------------------
 # MCP Client
 # ---------------------------------------------------------------------------
 class MCPError(Exception):
@@ -377,7 +466,8 @@ def phase2_refs(client: MCPClient, state: StateManager,
 
 
 def phase3_decompile(client: MCPClient, state: StateManager,
-                     progress: dict, funcs: list, module: str):
+                     progress: dict, funcs: list, module: str,
+                     is_skip_fn=None):
     callees_cache = progress.get("callees", {})
     xrefs_cache = progress.get("xrefs", {})
     errors = []
@@ -391,6 +481,10 @@ def phase3_decompile(client: MCPClient, state: StateManager,
     for i, func in enumerate(funcs):
         name = func["name"]
         addr = func["addr"]
+
+        if is_skip_fn and is_skip_fn(name):
+            skipped += 1
+            continue
 
         if state.is_dumped(name):
             skipped += 1
@@ -488,8 +582,11 @@ def phase3_update_headers(state: StateManager, progress: dict,
 
 
 def phase5_manifest(state: StateManager, progress: dict,
-                    funcs: list, module: str):
+                    funcs: list, module: str, is_skip_fn=None):
     print("[Phase 5] Writing manifest.json...")
+
+    if is_skip_fn is None:
+        is_skip_fn = is_crt_function
 
     callees_cache = progress.get("callees", {})
     xrefs_cache = progress.get("xrefs", {})
@@ -509,7 +606,7 @@ def phase5_manifest(state: StateManager, progress: dict,
             "file": f"raw_funcs/{name}.c",
             "callees": callees_cache.get(addr, []),
             "xrefs_to": xrefs_cache.get(addr, []),
-            "skip": is_crt_function(name),
+            "skip": is_skip_fn(name),
         }
 
     manifest = {
@@ -607,6 +704,8 @@ def main():
                         help="Clear cached xrefs and re-fetch them")
     parser.add_argument("--update-headers", action="store_true",
                         help="Update .c file headers from cached data (no MCP calls)")
+    parser.add_argument("--golang", action="store_true", default=None,
+                        help="Force Go mode: skip runtime/stdlib packages (auto-detected if not set)")
     args = parser.parse_args()
 
     print(f"=== ida_dump: {args.module} @ port {args.port} ===")
@@ -628,6 +727,16 @@ def main():
     # Phase 1
     funcs = phase1_functions(client, state, progress, args.batch_size)
 
+    # Determine skip function (Go vs C/C++)
+    go_mode = args.golang
+    if go_mode is None:
+        go_mode = detect_golang(funcs)
+    if go_mode:
+        print(f"[Mode] Go binary detected — using Go runtime skip list")
+        is_skip_fn = is_go_skip_function
+    else:
+        is_skip_fn = is_crt_function
+
     # Phase 2
     phase2_refs(client, state, progress, funcs, args.addrs_batch, args.xrefs_batch)
 
@@ -636,13 +745,14 @@ def main():
         phase3_update_headers(state, progress, funcs, args.module)
     else:
         # Phase 3
-        phase3_decompile(client, state, progress, funcs, args.module)
+        phase3_decompile(client, state, progress, funcs, args.module,
+                         is_skip_fn=is_skip_fn)
 
     # Phase 4
     phase4_metadata(client, state, progress)
 
     # Phase 5
-    phase5_manifest(state, progress, funcs, args.module)
+    phase5_manifest(state, progress, funcs, args.module, is_skip_fn=is_skip_fn)
 
     # Phase 6
     phase6_prepare_workspace(state)
