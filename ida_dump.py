@@ -281,7 +281,17 @@ def fetch_decompile(client: MCPClient, addr: str):
     try:
         result = client.call("decompile", {"addr": addr})
         return result.get("code")
-    except Exception as e:
+    except Exception:
+        return None
+
+
+def fetch_disasm(client: MCPClient, addr: str):
+    try:
+        result = client.call("disasm", {"addr": addr})
+        asm = result.get("asm", {})
+        lines = asm.get("lines", "")
+        return lines if lines else None
+    except Exception:
         return None
 
 
@@ -467,7 +477,7 @@ def phase2_refs(client: MCPClient, state: StateManager,
 
 def phase3_decompile(client: MCPClient, state: StateManager,
                      progress: dict, funcs: list, module: str,
-                     is_skip_fn=None):
+                     is_skip_fn=None, disasm_mode: bool = False):
     callees_cache = progress.get("callees", {})
     xrefs_cache = progress.get("xrefs", {})
     errors = []
@@ -476,7 +486,8 @@ def phase3_decompile(client: MCPClient, state: StateManager,
     skipped = 0
     decompiled = 0
 
-    print(f"[Phase 3] Decompiling {total} functions...")
+    mode_label = "disasm" if disasm_mode else "decompile"
+    print(f"[Phase 3] {mode_label.capitalize()}ing {total} functions...")
 
     for i, func in enumerate(funcs):
         name = func["name"]
@@ -490,10 +501,14 @@ def phase3_decompile(client: MCPClient, state: StateManager,
             skipped += 1
             continue
 
-        code = fetch_decompile(client, addr)
+        if disasm_mode:
+            code = fetch_disasm(client, addr)
+        else:
+            code = fetch_decompile(client, addr)
+
         if code is None:
             errors.append({"addr": addr, "name": name})
-            print(f"  ERROR: {i+1}/{total} {name} ({addr}) — decompile failed")
+            print(f"  ERROR: {i+1}/{total} {name} ({addr}) — {mode_label} failed")
             continue
 
         callees = callees_cache.get(addr, [])
@@ -706,6 +721,8 @@ def main():
                         help="Update .c file headers from cached data (no MCP calls)")
     parser.add_argument("--golang", action="store_true", default=None,
                         help="Force Go mode: skip runtime/stdlib packages (auto-detected if not set)")
+    parser.add_argument("--disasm", action="store_true",
+                        help="Disasm mode: use disassembly instead of decompile. Skips functions already dumped (two-stage friendly)")
     args = parser.parse_args()
 
     print(f"=== ida_dump: {args.module} @ port {args.port} ===")
@@ -746,7 +763,7 @@ def main():
     else:
         # Phase 3
         phase3_decompile(client, state, progress, funcs, args.module,
-                         is_skip_fn=is_skip_fn)
+                         is_skip_fn=is_skip_fn, disasm_mode=args.disasm)
 
     # Phase 4
     phase4_metadata(client, state, progress)
