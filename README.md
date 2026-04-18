@@ -15,6 +15,13 @@ ida-procon closes that gap. You dump the binary once, close IDA, and never open 
 Mixed fleet: Claude Opus + Sonnet + GPT via Codex CLI
 ```
 
+## Benchmarks
+
+**Flare-On 2024 Challenge 2** (`checksum`, Golang) — complete runtime pipeline reconstructed in **207 seconds, 49,738 tokens, ~$3** in API costs.
+[Full write-up →](link-to-blog-post)
+
+**Production** — 948 functions documented across a 7,000-function industrial binary in **15 minutes with 6 parallel agents for $6**. Equivalent manual work: 4 engineers × 6 months.
+
 ## Why this is different
 
 **You dump once and close IDA.** `ida_dump.py` connects to IDA's [MCP server](https://github.com/mrexodia/ida-pro-mcp), batch-decompiles every function with callees, xrefs, and metadata, and writes structured `.c` files. After that, all work happens through the coordinator API. IDA is not needed again.
@@ -237,6 +244,13 @@ ida-procon закрывает этот разрыв. Вы дампите бин�
 20 агентов параллельно = 690 контуров, 2399 функций задокументировано в 13 модулях
 Смешанный флот: Claude Opus + Sonnet + GPT через Codex CLI
 ```
+
+## Бенчмарки
+
+**Flare-On 2024 Challenge 2** (`checksum`, Golang) — полный runtime-пайплайн восстановлен за **207 секунд, 49 738 токенов, ~$3** API-затрат.
+[Write-up →](link-to-blog-post)
+
+**Production** — 948 функций задокументировано в 7000-функциональном промышленном бинарнике за **15 минут, 6 параллельных агентов, $6**. Эквивалент ручной работы: 4 инженера × 6 месяцев.
 
 ## Почему это другое
 
