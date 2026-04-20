@@ -58,6 +58,22 @@ Verified against [Hasherezade's write-up](https://hshrzd.wordpress.com/2022/10/1
 
 The agent performed no dynamic analysis and did not use an emulator. Reference solutions required Mini vMac setup, ROM sourcing, disk mounting, and visual resource inspection. Procon reached the same flag via static analysis of the disk image through IDA + contour graph alone.
 
+**Ablation — same task, same model, no procon:**
+
+A second run gave the agent direct access to the same 693 raw `.c` files but no contour graph, no coordinator, no structured navigation.
+
+| | With procon | Without procon |
+|---|---|---|
+| Time | ~40 min (extraction phase) | ~15 min |
+| Tokens | ~50k (extraction) | ~45k |
+| Flag | ✅ Found | ❌ Not found |
+
+The no-procon agent grepped across all 693 files, read 17 functions in full, and built a Python call graph — and still could not find the flag. Its final report correctly identified the root cause: *"The flag lives in the data region (resource-fork-like payload) — but raw\_funcs/ is code-only, so I have no way to inspect those bytes."* The hypothesis was right. The path to it was not.
+
+With the contour graph, the extraction agent navigated directly to the `decodeFlag` function (`CODE 1` at disk offset `0x75D2`), read the resource fork layout from the contour's description, and extracted the key in a single pass. The contour graph replaced ~14 minutes of exhausted search with a 2-step lookup.
+
+The no-procon agent also suffered from structural noise: 229 of 693 functions have no callers in the disassembly (they are invoked through the A5 jump table, invisible in a flat `.c` listing). The coverage phase resolves this — the `a5_jumptable_dispatcher@sub_DB606` contour documents the dispatch mechanism, giving the extraction agent a map of the entry points that static grep cannot provide.
+
 ### Why M68K matters
 
 Hex-Rays pseudocode for legacy architectures (M68K, PowerPC, older MIPS) is thin in LLM training data. Empirically, agents reason more reliably on raw disassembly for these ISAs than on decompiler pseudocode — general assembly knowledge transfers across architectures, unfamiliar pseudocode dialects invite hallucination. The coverage phase used disassembly-first input for this reason.
@@ -337,6 +353,22 @@ Golang-бинарник. Один агент Opus, 207 секунд, 49 738 то
 Верифицировано по [write-up Hasherezade](https://hshrzd.wordpress.com/2022/10/10/flare-on-9-task-10/) — точное совпадение.
 
 Агент не проводил динамический анализ и не использовал эмулятор. В референсных решениях требовались: настройка Mini vMac, поиск ROM, монтирование диска, визуальный осмотр ресурсов. Procon достиг того же флага через статический анализ образа диска в IDA + граф контуров.
+
+**Аблация — та же задача, та же модель, без procon:**
+
+Второй прогон дал агенту прямой доступ к тем же 693 сырым `.c` файлам, но без графа контуров, координатора и структурированной навигации.
+
+| | С procon | Без procon |
+|---|---|---|
+| Время | ~40 мин (фаза извлечения) | ~15 мин |
+| Токены | ~50k (извлечение) | ~45k |
+| Флаг | ✅ Найден | ❌ Не найден |
+
+Агент без procon прогрепал все 693 файла, прочитал 17 функций целиком, построил Python-граф вызовов — и всё равно флаг не нашёл. Его итоговый отчёт точно определил причину: *«Флаг лежит в data-регионе (ресурсный форк), но raw\_funcs/ содержит только код — инспектировать эти байты невозможно»*. Гипотеза была верной. Пути к ней — нет.
+
+С графом контуров агент сразу вышел на функцию `decodeFlag` (`CODE 1`, смещение на диске `0x75D2`), прочитал структуру ресурсного форка из описания контура и извлёк ключ за один проход. Граф контуров заменил ~14 минут безрезультатного поиска двухшаговым lookup'ом.
+
+Дополнительная причина провала без procon: у 229 из 693 функций нет явных caller'ов в дизассемблере — они вызываются через A5 jump table, невидимую в плоском списке `.c` файлов. Фаза покрытия решает эту проблему: контур `a5_jumptable_dispatcher@sub_DB606` документирует механизм диспетчеризации, давая агенту карту точек входа, которую grep не может предоставить.
 
 ### Почему M68K важен
 
