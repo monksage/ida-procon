@@ -179,6 +179,14 @@ python ida_dump.py --port 13337 --module mylib --output dump
 
 This decompiles all functions and writes them to `dump/mylib/raw_funcs/` with a `manifest.json` index. Close IDA after the dump completes.
 
+**For architectures without a Hex-Rays decompiler** (Motorola 68K, older MIPS, etc.) use `--disasm` instead:
+
+```bash
+python ida_dump.py --port 13337 --module mylib --output dump --disasm
+```
+
+In disasm mode, each `.c` file contains raw IDA disassembly instead of pseudocode. The coordinator and agents work identically — agents read the disassembly directly. For legacy ISAs, this is often preferable: decompiler pseudocode for uncommon architectures is underrepresented in LLM training data, while general assembly knowledge transfers reliably across ISAs.
+
 ### 2. Start the coordinator
 
 ```bash
@@ -450,6 +458,14 @@ python ida_dump.py --port 13337 --module mylib --output dump
 ```
 
 Декомпилирует все функции и запишет в `dump/mylib/raw_funcs/` с индексом `manifest.json`. После завершения закройте IDA.
+
+**Для архитектур без декомпилятора Hex-Rays** (Motorola 68K, старый MIPS и т.д.) используйте `--disasm`:
+
+```bash
+python ida_dump.py --port 13337 --module mylib --output dump --disasm
+```
+
+В режиме дизассемблера каждый `.c` файл содержит сырой IDA-дизассемблер вместо псевдокода. Координатор и агенты работают идентично. Для устаревших ISA этот режим зачастую предпочтительнее: псевдокод Hex-Rays для редких архитектур плохо представлен в обучающих данных LLM, тогда как знание ассемблера надёжно переносится между архитектурами.
 
 ### 2. Запуск координатора
 
